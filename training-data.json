@@ -1,8 +1,27 @@
 {
   "version": 4,
-  "updatedAt": "2026-09-09T09:32:34.954Z",
+  "updatedAt": "2026-09-09T09:34:10.734Z",
   "start": "2026-09-09",
-  "logs": {},
-  "done": {},
-  "weights": {}
+  "logs": {
+    "中立握高位下拉": [
+      {
+        "date": "2026-09-09",
+        "weight": 0
+      }
+    ],
+    "坐姿绳索划船": [
+      {
+        "date": "2026-09-09",
+        "weight": 0
+      }
+    ]
+  },
+  "done": {
+    "training_done_2026-09-09_0": "1",
+    "training_done_2026-09-09_1": "1"
+  },
+  "weights": {
+    "training_weight_2026-09-09_0": "0",
+    "training_weight_2026-09-09_1": "0"
+  }
 }
