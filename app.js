@@ -10,7 +10,61 @@ function record(name,date,weight){state.logs[name]??=[];const r={date,weight:Num
 const base=`https://api.github.com/repos/${OWNER}/${REPO}/contents/`;const headers=()=>({Accept:'application/vnd.github+json',Authorization:`Bearer ${localStorage.getItem(TOKEN)}`,'X-GitHub-Api-Version':'2022-11-28'});const bytesB64=u=>{let s='';for(let i=0;i<u.length;i+=0x8000)s+=String.fromCharCode(...u.subarray(i,i+0x8000));return btoa(s)};const b64Bytes=s=>Uint8Array.from(atob(s.replace(/\n/g,'')),c=>c.charCodeAt(0));
 async function gzip(data){if(!window.CompressionStream)throw Error('此浏览器不支持压缩同步，请升级浏览器。');const stream=new Blob([JSON.stringify(data)]).stream().pipeThrough(new CompressionStream('gzip'));return bytesB64(new Uint8Array(await new Response(stream).arrayBuffer()))}async function ungzip(content){const stream=new Blob([b64Bytes(content)]).stream().pipeThrough(new DecompressionStream('gzip'));return JSON.parse(await new Response(stream).text())}
 async function removeOld(){if(localStorage.getItem('legacy_remote_pruned'))return;const r=await fetch(base+OLD_PATH,{headers:headers()});if(r.status===404){localStorage.setItem('legacy_remote_pruned','1');return}if(!r.ok)return;const j=await r.json();const del=await fetch(base+OLD_PATH,{method:'DELETE',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify({message:'Remove legacy uncompressed training data',sha:j.sha,branch:BRANCH})});if(del.ok)localStorage.setItem('legacy_remote_pruned','1')}
-async function push(){if(syncing)return;const token=localStorage.getItem(TOKEN);if(!token){setStatus('还没有 token：记录已在本机保存。','bad');return}try{syncing=true;setStatus('正在自动提交…');const r=await fetch(`${base}${PATH}?ref=${BRANCH}`,{headers:headers()});let sha;if(r.ok)sha=(await r.json()).sha;else if(r.status!==404)throw Error(`读取失败 ${r.status}`);const body={message:`记录训练 · ${ymd(viewDate)}`,content:await gzip(state),branch:BRANCH};if(sha)body.sha=sha;const put=await fetch(base+PATH,{method:'PUT',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify(body)});if(!put.ok)throw Error(`提交失败 ${put.status}`);removeOld();setStatus(`已自动提交 · ${new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}`,'good');note('当天训练已完成并自动提交。')}catch(e){setStatus(`同步失败：${e.message}`,'bad')}finally{syncing=false}}
+let syncQueued=false;
+function mergeRecords(remote,local){
+  const merged=normalize(remote);
+  merged.start=local.start;
+  merged.done={...merged.done,...local.done};
+  merged.weights={...merged.weights,...local.weights};
+  for(const [name,records] of Object.entries(local.logs)){
+    const byDate=new Map((merged.logs[name]||[]).map(r=>[r.date,r]));
+    records.forEach(r=>byDate.set(r.date,r));
+    merged.logs[name]=[...byDate.values()];
+  }
+  return merged;
+}
+async function latestFile(path=PATH){
+  return fetch(`${base}${path}?ref=${BRANCH}&fresh=${Date.now()}`,{headers:headers(),cache:'no-store'});
+}
+async function push(){
+  if(syncing){syncQueued=true;return}
+  if(!localStorage.getItem(TOKEN)){setStatus('还没有 token：记录已在本机保存。','bad');return}
+  syncing=true;
+  // Keep a separate recovery copy before any cloud merge.
+  localStorage.setItem('training_state_before_sync',JSON.stringify(state));
+  try{
+    do{
+      syncQueued=false;
+      let uploaded=false;
+      for(let attempt=0;attempt<3;attempt++){
+        setStatus(attempt?'检测到版本变化，正在重新同步…':'正在自动提交…');
+        const r=await latestFile();
+        let sha,remote;
+        if(r.ok){const file=await r.json();sha=file.sha;remote=await ungzip(file.content)}
+        else if(r.status!==404)throw Error(`读取失败 ${r.status}`);
+        const snapshot=JSON.parse(JSON.stringify(state));
+        const merged=remote?mergeRecords(remote,snapshot):snapshot;
+        const body={message:`记录训练 · ${ymd(viewDate)}`,content:await gzip(merged),branch:BRANCH};
+        if(sha)body.sha=sha;
+        const put=await fetch(base+PATH,{method:'PUT',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify(body),cache:'no-store'});
+        if(put.status===409)continue;
+        if(!put.ok)throw Error(`提交失败 ${put.status}`);
+        const receipt=await put.json();
+        const verify=await latestFile();
+        if(!verify.ok)throw Error('已提交，但暂时无法确认云端记录');
+        const verified=await verify.json();
+        if(verified.sha!==receipt.content.sha)throw Error('提交后云端再次变化，本地记录已保留，请重试');
+        state=mergeRecords(merged,state);save();
+        uploaded=true;break;
+      }
+      if(!uploaded)throw Error('云端版本持续变化，本地记录已保留，请稍后重试');
+    }while(syncQueued);
+    renderHistory();
+    setStatus('已同步并核对云端记录','good');
+    note('训练记录已同步并通过云端核对。');
+  }catch(e){setStatus(`同步失败：${e.message}`,'bad')}
+  finally{syncing=false}
+}
 async function pull(){const token=localStorage.getItem(TOKEN);if(!token){setStatus('请先保存 token。','bad');return}try{setStatus('正在恢复记录…');let r=await fetch(`${base}${PATH}?ref=${BRANCH}`,{headers:headers()}),data;if(r.ok)data=await ungzip((await r.json()).content);else if(r.status===404){r=await fetch(`${base}${OLD_PATH}?ref=${BRANCH}`,{headers:headers()});if(!r.ok)throw Error(`读取失败 ${r.status}`);data=JSON.parse(new TextDecoder().decode(b64Bytes((await r.json()).content)))}else throw Error(`读取失败 ${r.status}`);state=normalize(data);save();render();setStatus('已恢复并迁移到新格式。','good')}catch(e){setStatus(`恢复失败：${e.message}`,'bad')}}
 function addGuide(item){const g=guides[item];if(!g)return null;const d=document.createElement('details');d.className='guide';d.innerHTML='<summary>查看动作提示</summary><div class="guideBody"><div class="exercisePhoto"></div><p class="cue"></p></div>';const p=d.querySelector('.exercisePhoto');p.style.setProperty('--x',g[0]);p.style.setProperty('--y',g[1]);d.querySelector('.cue').textContent=g[2];return d}
 function auto(){const p=plan[index(viewDate)],date=ymd(viewDate);if(!p.items.length)return;const complete=p.items.every((_,i)=>state.done[dayKey(viewDate,i)]);if(!complete){note();return}const missing=p.items.map((x,i)=>({x,i})).filter(({x,i})=>strength.has(x)&&!state.weights[dayKey(viewDate,i)]);if(missing.length){note(`训练已完成，但还缺 ${missing.map(x=>x.x).join('、')} 的重量。填写后会自动提交。`);missing.forEach(({i})=>document.querySelector(`[data-i="${i}"]`)?.classList.add('missing'));return}p.items.forEach((x,i)=>strength.has(x)&&record(x,date,state.weights[dayKey(viewDate,i)]));save();note('已完成，正在自动提交到 GitHub…');push()}
